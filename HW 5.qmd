@@ -1,0 +1,232 @@
+---
+title: "ST 558 HW 5"
+author: "Alise Miller"
+format: pdf
+editor: visual
+---
+## Task 1: Conceptual Quesitons
+
+1. The purposes of cross-validation when fitting a random forest model is to help find the best fit. So find the model that has the best metrics and that doesn't over fit for best generalization. 
+
+2. Bagged tree algorithm has many steps. The steps include having your original sample. From there getting the bootstrap samples. For non parametric we treat the sample as population, the resampling is done with replacement and we can get the same observation multiple times. After all of the trees are trained we get the bootstrap statistics. 
+
+3. General linear model is y= B_0 + B_1X_1 + B_2X_2 +B_3X_3.... This means a model that uses one or more predictors to predict the response variable. When I think of GLM is the the first model that comes to mind when making a model. 
+
+4. Adding an interaction term to MLR helps control the effect of one predictor to another. Predictors can change based on the level of other predictors. 
+
+5. We split our data into training and test sets so that we can have an accurate model and so that the data isn't over fit. The training set helps to make the model, while the testing evaulate how well the model will work for future data. 
+
+## Task 2: Data Prep
+### packages and data 
+```{r, message=FALSE}
+suppressWarnings(library(tidyverse))
+suppressWarnings(library(tidymodels))
+suppressWarnings(library(caret))
+suppressWarnings(library(yardstick))
+
+heart_data <- read_csv("https://www4.stat.ncsu.edu/~online/datasets/heart.csv")
+```
+
+### 1. Run and report summary
+```{r}
+summary(heart_data)
+str(heart_data)
+```
+1. a. In R Heart Disease is "num" so it is understood as quantitative. 
+1.b. This doesn't make since because these are it's yes or no and it does not make sense to average yes or no. Maybe count or percent of Yes versus No's makes better sense. 
+
+### 2. Change Heart Disease
+```{r}
+new_heart <- heart_data |> 
+  mutate(heartdisease_yes_no = 
+           factor(HeartDisease,
+                  levels = c(0,1),
+                  labels = c("No", "Yes"))
+  ) |>
+  select(-HeartDisease, -ST_Slope)
+glimpse(new_heart) #just to check
+```
+
+## Task 3 EDA
+### 1. Plot
+```{r}
+ggplot(new_heart, 
+       aes(x= MaxHR, y = Age, color = heartdisease_yes_no)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    x= "Max Heart Rate",
+    y= "Age",
+  title = "Age Predicted by Max HR and Heart Disease", 
+  color = "Heart Disease") +
+  scale_color_viridis_d()
+```
+
+### 2.Interpret Plot
+It seems like both lines have a downward slope, but they intersect so they are not the same slope. From the scatter plot it seems like people that have heart disease are older and have a lower max heart heart. While people with no heart disease are younger and have a higher max heart rate. The line for people with and without heart disease seem to have a similar y-intercept with the no heart disease being slightly higher. With all of this I think that it is best we use an interaction model. 
+
+## Task 4 Testing and Training
+
+```{r}
+set.seed(101)  
+new_heart_split <- initial_split(new_heart, prop = 0.8) 
+new_heart_train <-training (new_heart_split) 
+new_heart_test <-testing (new_heart_split)
+```
+
+## Task 5: OLS and LASSO
+
+### 1. Interaction Model
+```{r}
+ols_mlr <- lm(formula = Age ~ MaxHR + heartdisease_yes_no 
+              + MaxHR*heartdisease_yes_no, 
+              data = new_heart_train )
+summary(ols_mlr)
+```
+### 2. Predict and RMSE
+```{r}
+pred1 <- predict(ols_mlr, newdata = new_heart_test)
+results1 <- data.frame(.pred = pred1, Age = new_heart_test$Age)
+
+OLS_rmse <- rmse(results1, truth = Age, estimate = .pred)
+```
+### 3. LASSO Recipe
+```{r}
+new_heart_cv_folds <- vfold_cv(new_heart_train, 10)
+LASSO_recipe <- 
+  recipe( Age ~ MaxHR + heartdisease_yes_no, data = new_heart_train) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_interact(terms = ~ MaxHR:starts_with("heartdisease_yes_no"))
+LASSO_recipe
+  
+```
+### 4. LASSO Spec and Grid
+```{r}
+LASSO_spec <- linear_reg(penalty = tune(), mixture = 1) |>
+  set_engine("glmnet")
+
+LASSO_wkf <-workflow() |>
+  add_recipe(LASSO_recipe) |>
+  add_model(LASSO_spec)
+LASSO_wkf
+
+LASSO_grid <-LASSO_wkf |>
+tune_grid(resamples = new_heart_cv_folds,
+          grid = grid_regular(penalty(), levels = 200),
+     metrics = metric_set(rmse))
+
+LASSO_grid
+
+LASSO_grid |>
+  collect_metrics() |>
+  filter(.metric == "rmse")
+
+lowest_rmse <- LASSO_grid |>
+  select_best(metric = "rmse")
+
+lowest_rmse
+
+LASSO_wkf |>
+  finalize_workflow(lowest_rmse)
+LASSO_final <- LASSO_wkf |>
+  finalize_workflow(lowest_rmse) |>
+  fit(new_heart_train)
+
+LASSO_rmse_val <- LASSO_final |>
+  predict(new_data = new_heart_test) |>
+  pull(.pred) |>
+  yardstick::rmse_vec(truth = new_heart_test$Age)
+
+LASSO_rmse_val
+
+tidy(LASSO_final)
+```
+
+### 5. RMSE
+I think that the RMSE calculation to be different, because I think the LASSO would be more accurate. IT has more "training" than the OLS. 
+
+### 6. RMSE OLS vs LASSO 
+ 
+```{r}
+OLS_rmse
+LASSO_rmse_val 
+```
+The RMSE for OLS is 9.10 while the RMSE for the LASSO data is 9.096. Although they are LASSO is slightly better, they are roughly the same if you keep 2 decimal places. 
+
+### 7. Why are they similar?
+I think they are similar because the penalty of the LASSO was very small. So that might mean that there wasn't anything to shrink. 
+
+
+## Task 6: Logistic Regression
+```{r}
+LR1_recipe <- recipe(heartdisease_yes_no ~ Sex + Age, data = new_heart_train) |>
+  step_normalize(Age) |>
+  step_dummy(Sex)
+
+LR2_recipe <- recipe(heartdisease_yes_no ~ Sex + ChestPainType + Age, data = new_heart_train) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors())
+LR_spec <- logistic_reg() |>
+  set_engine("glm")
+LR1_wf <- workflow() |>
+  add_recipe(LR1_recipe) |>
+  add_model(LR_spec)
+LR2_wf <- workflow() |>
+  add_recipe(LR2_recipe) |>
+  add_model(LR_spec)
+LR1_fit <- fit(LR1_wf, data = new_heart_test)
+LR2_fit <- fit(LR2_wf, data = new_heart_test)
+
+LR1_fit
+LR2_fit
+  
+```
+With resampling
+```{r}
+repeatnew_heart_cv_folds <- vfold_cv(new_heart_train, v= 10, repeats = 5 )
+LR1_resampling <- LR1_wf |>
+  fit_resamples(repeatnew_heart_cv_folds, metrics = metric_set(accuracy, mn_log_loss))
+LR2_resampling <- LR2_wf |>
+  fit_resamples(repeatnew_heart_cv_folds, metrics = metric_set(accuracy, mn_log_loss))
+
+LR1_resampling
+LR2_resampling
+
+collect_metrics(LR1_resampling)
+collect_metrics(LR2_resampling)
+
+```
+
+```{r}
+model1 <- collect_metrics(LR1_resampling) |>
+  mutate(Model = "Model1")
+model2 <- collect_metrics(LR2_resampling) |>
+  mutate(Model = "Model2")
+combined_metric <- rbind(model1, model2)
+
+combined_metric
+```
+
+I think my best performing model is Model 2, because it has the higher accuracy (.773) and the lowest log loss (.489) means.  
+
+### 2 Confusion Matrix  
+```{r}
+LR2_fit <- fit(LR2_wf, data = new_heart_train)
+prediction <- predict(LR2_fit, new_data = new_heart_test) |>
+  pull() |>
+  factor(levels = c("No", "Yes"))
+confusionMatrix(
+  data = prediction,
+  reference = new_heart_test$heartdisease_yes_no
+)
+```
+The accuracy is about 80%. 
+
+### 3 Sensitivity and Specificity and interpretation
+
+Sensitivity : 0.7766          
+Specificity : 0.8222
+
+Sensitivity, 77.66% is the percent of people who don't have heart disease that receive the negative result.  Specificity, 82.22% is the percent of people who truly have heart disease that are correctly identified. This reminds me of false positives and false negatives in inference.
+
